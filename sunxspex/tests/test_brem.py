@@ -3,7 +3,7 @@ import numpy as np
 import astropy.units as u
 import time
 
-from sunxspex import emission_tst as emission
+from sunxspex import emission as emission
 
 
 def test_brem_collisional_loss():

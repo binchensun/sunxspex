@@ -2,6 +2,8 @@
 Functions for computing the photon flux due to bremsstrahlung radiation from energetic electrons
 impacting a dense plasma.
 
+Replica from sunxspex/emission_orig.py, but try to simplify the integration
+
 References
 ----------
 
@@ -11,6 +13,8 @@ References
 """
 import numpy as np
 from scipy.special import lpmv
+from scipy import integrate
+import pdb
 
 from sunxspex.constants import Constants
 
@@ -193,8 +197,8 @@ def bremsstrahlung_cross_section(electron_energy, photon_energy, z=1.2):
     Parameters
     ----------
     electron_energy : np.array
-        Electron energies
-    photon_energy : np.arry
+        Electron energies, 1d or 2d; the first dimension has to be the same as photon_energy
+    photon_energy : np.array
         Photon energies corresponding to electron_energy
     z : float
         Mean atomic number of target plasma
@@ -215,6 +219,7 @@ def bremsstrahlung_cross_section(electron_energy, photon_energy, z=1.2):
     Initial version modified from SSW Brm_BremCross.pro
         https://hesperia.gsfc.nasa.gov/ssw/packages/xray/idl/brm/brm_bremcross.pro
     """
+    # TODO perhaps we need a safeguard just in case electron_energy < photon_energy? Return 0 if it happens.
 
     mc2 = const.get_constant('mc2')
     alpha = const.get_constant('alpha')
@@ -320,7 +325,6 @@ def brm2_fthin(electron_energy, photon_energy, eelow, eebrk, eehigh, p, q, z=1.2
         photon_flux = electron_dist * brem_cross * pc / gamma  # that is n_e * sigma * mc2 * (v / c)
 
     return photon_flux
-
 
 def brem_outer(electron_energy, photon_energy, eelow, eebrk, eehigh, p, q, z=1.2):
     """
@@ -541,6 +545,7 @@ def brm2_dmlin(a, b, maxfcn, rerr, eph, eelow, eebrk, eehigh, p, q, z, efd=True,
             lastsum1 = np.copy(intsum1)
 
             # Perform integration sum w_i * f(x_i)  i=1 to npoints
+            #pdb.set_trace()
             intsum1[l] = np.sum((10.0 ** xi * np.log(10.0) * wi
                                  * brm2_fthin(10.0 ** xi, eph1, eelow, eebrk, eehigh, p, q, z, efd)), axis=1)
 
@@ -814,7 +819,7 @@ def brm2_dmlino(a, b, maxfcn, rerr, eph, eelow, eebrk, eehigh, p, q, z):
     return DmlinO, ier
 
 
-def bremsstrahlung_thin_target(eph, p, eebrk, q, eelow, eehigh, efd=True):
+def bremsstrahlung_thin_target(eph, edist='bkpl', params=None, efd = True):
     """
     Computes the thin-target bremsstrahlung x-ray/gamma-ray spectrum from an isotropic electron
     distribution function provided in `broken_powerlaw`. The units of the computed flux is photons
@@ -827,16 +832,32 @@ def bremsstrahlung_thin_target(eph, p, eebrk, q, eelow, eehigh, efd=True):
     ----------
     eph : np.array
         Array of photon energies to evaluate flux at
-    p   : float
-        Slope below the break energy
-    eebrk : float
-        Break energy
-    q   : float
-        Slope above the break energy
-    eelow : float
-        Low energy electron cut off
-    eehigh : float
-        High energy electron cut off
+    edist: str
+        name of the electron distribution function
+        - "pl": single powerlaw
+        - "bkpl": broken powerlaw
+        - "kappa": kappa distribution
+        - "discrete": discrete distribution given by an array of electron energy "E_ele"
+         and differential electron distribution "dn/dE"
+    params: tuple
+        parameters of the specific distribution
+        - for powerlaw, params = (p, eelow, eehigh) (see below)
+        - for broken powerlaw, params = (p, q, eelow, eebrk, eehigh)
+            p   : float
+                Slope below the break energy
+            q   : float
+                Slope above the break energy
+            eelow : float
+                Low energy electron cut off
+            eebrk : float
+                Break energy
+            eehigh : float
+                High energy electron cut off
+        - for kappa, params = TBD
+        - for discrete, params  = (electron_energy, electron_distro)
+            electron_energy: np.array of electron energies. Unit: keV
+            electron_distro: np.array of differential electron distribution at the given electron energy.
+
     efd: bool.
         True (default) - input electron distribution is electron flux density distribution
             (unit electrons cm^-2 s^-1 keV^-1),
@@ -869,38 +890,67 @@ def bremsstrahlung_thin_target(eph, p, eebrk, q, eelow, eehigh, efd=True):
     clight = const.get_constant('clight')
     au = const.get_constant('au')
     r0 = const.get_constant('r0')
-
-    # Max number of points
-    maxfcn = 2048
-
-    # Average atomic number
-    z = 1.2
-
-    # Relative error
-    rerr = 1e-4
-
-    # Numerical coefficient for photo flux
+    # Numerical coefficient for photon flux
     fcoeff = (clight / (4 * np.pi * au ** 2)) / mc2 ** 2.
 
-    # Create arrays for the photon flux and error flags.
-    flux = np.zeros_like(eph, dtype=np.float64)
-    iergq = np.zeros_like(eph, dtype=np.float64)
+    if edist == 'bkpl':
+        p = params[0]
+        q = params[1]
+        eelow = params[2]
+        eebrk = params[3]
+        eehigh = params[4]
 
-    if eelow >= eehigh:
-        raise ValueError('eehigh must be larger than eelow!')
+        # Max number of points
+        maxfcn = 2048
+
+        # Average atomic number
+        z = 1.2
+
+        # Relative error
+        rerr = 1e-4
+
+        # Create arrays for the photon flux and error flags.
+        flux = np.zeros_like(eph, dtype=np.float64)
+        iergq = np.zeros_like(eph, dtype=np.float64)
+
+        if eelow >= eehigh:
+            raise ValueError('eehigh must be larger than eelow!')
+            return flux
+
+        l, = np.where((eph < eehigh) & (eph > 0))
+        if l.size > 0:
+            flux[l], iergq[l] = brm2_dmlin(eph[l], np.full_like(l, eehigh), maxfcn, rerr,
+                                           eph[l], eelow,
+                                           eebrk, eehigh, p, q, z, efd)
+
+            flux *= fcoeff
+
+            return flux
+        else:
+            raise Warning('The photon energies are higher than the highest electron energy or not greater than zero')
+
+    if edist == 'discrete':
+        electron_energy = params[0]
+        electron_distro = params[1]
+        flux = np.full_like(eph, 0.)
+        for i, eph0 in enumerate(eph):
+            # only electrons with energy above E_photon can contribute to the photon flux
+            l, = np.where((electron_energy > eph0))
+            if l.size > 0:
+                # calculate integrand
+                gamma = (electron_energy[l] / mc2) + 1.0
+                pc = np.sqrt(electron_energy[l] * (electron_energy[l] + 2.0 * mc2))
+                brem_cross = bremsstrahlung_cross_section(electron_energy[l], eph0)
+                # calculate photon flux per electron energy bin
+                if efd:
+                    # if electron flux distribution is assumed (default)
+                    flux_diff = electron_distro[l] * brem_cross * (mc2 / clight)
+                else:
+                    # if electron density distribution is assumed
+                    flux_diff = electron_distro[l] * brem_cross * pc / gamma  # that is n_e * sigma * mc2 * (v / c)
+                # now integrate the differential photon_flux with electron energy
+                flux[i] = fcoeff * integrate.trapz(flux_diff, electron_energy[l])
         return flux
-
-    l, = np.where((eph < eehigh) & (eph > 0))
-    if l.size > 0:
-        flux[l], iergq[l] = brm2_dmlin(eph[l], np.full_like(l, eehigh), maxfcn, rerr,
-                                       eph[l], eelow,
-                                       eebrk, eehigh, p, q, z, efd)
-
-        flux *= fcoeff
-
-        return flux
-    else:
-        raise Warning('The photon energies are higher than the highest electron energy or not greater than zero')
 
 def bremsstrahlung_thick_target(eph, p, eebrk, q, eelow, eehigh):
     """
